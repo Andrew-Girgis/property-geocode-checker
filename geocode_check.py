@@ -29,6 +29,9 @@ from typing import Any, Dict, List, Optional
 GOOGLE_GEOCODE_ENDPOINT = "https://maps.googleapis.com/maps/api/geocode/json"
 
 
+CACHE_VERSION = 1
+
+
 @dataclass(frozen=True)
 class GeocodeResult:
     status: str
@@ -40,6 +43,74 @@ class GeocodeResult:
     location_type: Optional[str]
     error_message: Optional[str]
     raw: Dict[str, Any]
+
+
+def _normalize_address(address: str) -> str:
+    return " ".join(address.strip().split())
+
+
+def _load_cache(cache_file: str) -> Dict[str, Any]:
+    if not cache_file:
+        return {"version": CACHE_VERSION, "entries": {}}
+    if not os.path.exists(cache_file):
+        return {"version": CACHE_VERSION, "entries": {}}
+
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"version": CACHE_VERSION, "entries": {}}
+        if data.get("version") != CACHE_VERSION:
+            # Ignore incompatible cache formats.
+            return {"version": CACHE_VERSION, "entries": {}}
+        if not isinstance(data.get("entries"), dict):
+            return {"version": CACHE_VERSION, "entries": {}}
+        return data
+    except Exception:
+        return {"version": CACHE_VERSION, "entries": {}}
+
+
+def _save_cache(cache_file: str, cache: Dict[str, Any]) -> None:
+    if not cache_file:
+        return
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except Exception:
+        # Cache write failure should never break the main run.
+        return
+
+
+def _geocode_result_to_cache_entry(result: GeocodeResult) -> Dict[str, Any]:
+    return {
+        "status": result.status,
+        "formatted_address": result.formatted_address,
+        "latitude": result.latitude,
+        "longitude": result.longitude,
+        "result_count": result.result_count,
+        "partial_match": result.partial_match,
+        "location_type": result.location_type,
+        "error_message": result.error_message,
+    }
+
+
+def _cache_entry_to_geocode_result(entry: Dict[str, Any]) -> Optional[GeocodeResult]:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return GeocodeResult(
+            status=str(entry.get("status", "")),
+            formatted_address=entry.get("formatted_address"),
+            latitude=entry.get("latitude"),
+            longitude=entry.get("longitude"),
+            result_count=int(entry.get("result_count", 0)),
+            partial_match=bool(entry.get("partial_match", False)),
+            location_type=entry.get("location_type"),
+            error_message=entry.get("error_message"),
+            raw={},
+        )
+    except Exception:
+        return None
 
 
 def _load_env_file_if_present(env_file: str) -> None:
@@ -280,6 +351,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--cache-file",
+        default=None,
+        help="Optional path to a JSON cache file to reuse geocode results across runs.",
+    )
+
+    parser.add_argument(
         "--sleep-ms",
         type=int,
         default=0,
@@ -331,6 +408,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     skipped_ambiguous = 0
     skipped_geocode_failure = 0
 
+    cache = _load_cache(args.cache_file) if (not args.dry_run and args.cache_file) else {"version": CACHE_VERSION, "entries": {}}
+    cache_entries: Dict[str, Any] = cache.get("entries", {}) if isinstance(cache.get("entries"), dict) else {}
+    cache_hits = 0
+    cache_misses = 0
+
+    def geocode_with_cache(address: str) -> GeocodeResult:
+        nonlocal cache_hits, cache_misses
+        key = _normalize_address(address)
+        if args.cache_file and key in cache_entries:
+            cached = _cache_entry_to_geocode_result(cache_entries[key])
+            if cached is not None:
+                cache_hits += 1
+                return cached
+        cache_misses += 1
+        result = geocode_address(address=address, api_key=api_key)
+        if args.cache_file:
+            cache_entries[key] = _geocode_result_to_cache_entry(result)
+        return result
+
     mismatches: List[Dict[str, str]] = []
 
     with open(args.input, "r", newline="", encoding="utf-8-sig") as f:
@@ -341,7 +437,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         input_fieldnames = list(reader.fieldnames)
         output_fieldnames = list(input_fieldnames)
-        for extra_col in ["google_latitude", "google_longitude"]:
+        for extra_col in ["google_latitude", "google_longitude", "distance_meters"]:
             if extra_col not in output_fieldnames:
                 output_fieldnames.append(extra_col)
 
@@ -385,7 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 google_lat: Optional[float] = None
                 google_lng: Optional[float] = None
                 try:
-                    result = geocode_address(address=address, api_key=api_key)
+                    result = geocode_with_cache(address)
                     if result.status == "OK" and _is_valid_lat_lng(result.latitude, result.longitude):
                         reason = _ambiguous_reason(result)
                         if reason is None:
@@ -397,6 +493,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
                 output_row["google_latitude"] = "" if google_lat is None else str(google_lat)
                 output_row["google_longitude"] = "" if google_lng is None else str(google_lng)
+                output_row["distance_meters"] = ""
                 mismatches.append(output_row)
 
                 print(
@@ -407,7 +504,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             # Call Google geocode.
             try:
-                result = geocode_address(address=address, api_key=api_key)
+                result = geocode_with_cache(address)
             except Exception as e:
                 skipped_geocode_failure += 1
                 print(f"Skip {row_tag}: geocode request error: {e}", file=sys.stderr)
@@ -441,6 +538,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 output_row = dict(row)
                 output_row["google_latitude"] = "" if result.latitude is None else str(result.latitude)
                 output_row["google_longitude"] = "" if result.longitude is None else str(result.longitude)
+                output_row["distance_meters"] = f"{distance_m:.3f}"
                 mismatches.append(output_row)
 
             if args.sleep_ms > 0:
@@ -473,6 +571,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "skipped_missing_address": skipped_missing_address,
         "skipped_ambiguous": skipped_ambiguous,
         "skipped_geocode_failure": skipped_geocode_failure,
+        "cache_file": args.cache_file,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
         "accounted_rows": accounted_rows,
     }
 
@@ -481,6 +582,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.summary_output:
         with open(args.summary_output, "w", encoding="utf-8") as sf:
             json.dump(summary, sf, indent=2)
+
+    # Persist cache at end of run.
+    if not args.dry_run and args.cache_file:
+        cache["entries"] = cache_entries
+        _save_cache(args.cache_file, cache)
 
     return 0
 

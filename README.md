@@ -50,6 +50,7 @@ The mismatches output keeps the same core columns as the input (`id`, `address`,
 
 - `google_latitude`
 - `google_longitude`
+- `distance_meters` (only populated when both coordinate pairs are valid)
 
 ## Google Maps API setup
 
@@ -62,6 +63,12 @@ export GOOGLE_MAPS_API_KEY="your_api_key_here"
 ```
 
 If you’re using a local `.env` file, keep it out of git (this repo’s `.gitignore` already ignores `.env`).
+
+This repo includes a template you can copy:
+
+```bash
+cp .env.example .env
+```
 
 ## How to run
 
@@ -88,6 +95,14 @@ Write mismatched rows to a CSV file:
 
 ```bash
 ./geocode_check.py --input properties.csv --mismatches-output mismatches.csv --tolerance-meters <METERS>
+```
+
+### Caching (optional)
+
+To avoid re-geocoding the same addresses across runs, you can enable a simple on-disk cache:
+
+```bash
+./geocode_check.py --input properties.csv --tolerance-meters <METERS> --cache-file .geocode_cache.json
 ```
 
 ### Handling invalid rows
