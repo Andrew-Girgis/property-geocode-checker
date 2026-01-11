@@ -1,3 +1,10 @@
 .env
 venv/
 __pycache__/
+
+# Generated outputs
+mismatches*.csv
+*_mismatches.csv
+
+# macOS
+.DS_Store
