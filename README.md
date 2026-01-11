@@ -121,11 +121,11 @@ If you see errors like `CERTIFICATE_VERIFY_FAILED` when calling Google, your Pyt
 - Recommended fix: install `certifi` in your venv:
 
 ```bash
-/Users/agirgis/Downloads/property-geocode-checker/venv/bin/python -m pip install --upgrade certifi
+~filepath/property-geocode-checker/venv/bin/python -m pip install --upgrade certifi
 ```
 
 - If it still fails, try setting this for the current shell session:
 
 ```bash
-export SSL_CERT_FILE="$(/Users/agirgis/Downloads/property-geocode-checker/venv/bin/python -c 'import certifi; print(certifi.where())')"
+export SSL_CERT_FILE="$(~filepath/property-geocode-checker/venv/bin/python -c 'import certifi; print(certifi.where())')"
 ```
